@@ -51,6 +51,7 @@
 %{
 #include <gnuradio/uhd/usrp_source.h>
 #include <gnuradio/uhd/usrp_sink.h>
+#include <gnuradio/uhd/usrp_msg_sink.h>
 #include <gnuradio/uhd/amsg_source.h>
 %}
 
@@ -133,10 +134,12 @@
 ////////////////////////////////////////////////////////////////////////
 %include <gnuradio/uhd/usrp_source.h>
 %include <gnuradio/uhd/usrp_sink.h>
+%include <gnuradio/uhd/usrp_msg_sink.h>
 %include <gnuradio/uhd/amsg_source.h>
 
 GR_SWIG_BLOCK_MAGIC2(uhd, usrp_source)
 GR_SWIG_BLOCK_MAGIC2(uhd, usrp_sink)
+GR_SWIG_BLOCK_MAGIC2(uhd, usrp_msg_sink)
 GR_SWIG_BLOCK_MAGIC2(uhd, amsg_source)
 
 ////////////////////////////////////////////////////////////////////////

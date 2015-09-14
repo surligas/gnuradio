@@ -49,6 +49,7 @@ list(APPEND gr_uhd_sources
     usrp_block_impl.cc
     usrp_source_impl.cc
     usrp_sink_impl.cc
+    usrp_msg_sink_impl.cc
     amsg_source_impl.cc
 )
 
