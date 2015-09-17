@@ -49,13 +49,21 @@ namespace gr {
                       io_signature::make(0, 0, 0)),
         usrp_block_impl(device_addr, stream_args, length_tag_name),
         _length_tag_key(length_tag_name.empty() ? pmt::PMT_NIL : pmt::string_to_symbol(length_tag_name)),
-        _nitems_to_send(0)
+        _nitems_to_send(0),
+        d_finished(false),
+        d_index_start(0),
+        d_remaining(0),
+        d_data_msgq(pmt::mp("message_in"))
     {
       _sample_rate = get_samp_rate();
+	d_thread = boost::shared_ptr<boost::thread>(
+	        new boost::thread(boost::bind(&usrp_msg_sink_impl::run, this)));
+	message_port_register_in(d_data_msgq);
     }
 
     usrp_msg_sink_impl::~usrp_msg_sink_impl()
     {
+	    d_finished=true;
     }
 
     ::uhd::dict<std::string, std::string>
@@ -310,232 +318,49 @@ namespace gr {
     /***********************************************************************
      * Work
      **********************************************************************/
-    int
-    usrp_msg_sink_impl::work(int noutput_items,
-                         gr_vector_const_void_star &input_items,
-                         gr_vector_void_star &output_items)
-    {
-      int ninput_items = noutput_items; //cuz it's a sync block
+void
+usrp_msg_sink_impl::run()
+{
 
-      // default to send a mid-burst packet
-      _metadata.start_of_burst = false;
-      _metadata.end_of_burst = false;
+	while (!d_finished) {
+		_metadata.has_time_spec=false;
+		gr_vector_const_void_star input_items;
 
-      //collect tags in this work()
-      const uint64_t samp0_count = nitems_read(0);
-      get_tags_in_range(_tags, 0, samp0_count, samp0_count + ninput_items);
-      if(not _tags.empty())
-        this->tag_work(ninput_items);
+		d_pmt_tuple = delete_head_blocking(d_data_msgq, 0);
+		d_remaining = pmt::to_uint64(
+		        pmt::tuple_ref(d_pmt_tuple, 0));
+		uint8_t* items = (uint8_t *) pmt::blob_data(pmt::tuple_ref(d_pmt_tuple, 1));
+		input_items.push_back(items);
+		_metadata.start_of_burst=true;
+		_metadata.end_of_burst=true;
 
-      if(not pmt::is_null(_length_tag_key)) {
-        //check if there is data left to send from a burst tagged with length_tag
-        //If a burst is started during this call to work(), tag_work() should have
-        //been called and we should have _nitems_to_send > 0.
-        if (_nitems_to_send > 0) {
-          ninput_items = std::min<long>(_nitems_to_send, ninput_items);
-          //if we run out of items to send, it's the end of the burst
-          if(_nitems_to_send - long(ninput_items) == 0)
-            _metadata.end_of_burst = true;
-        }
-        else {
-          //There is a tag gap since no length_tag was found immediately following
-          //the last sample of the previous burst. Drop samples until the next
-          //length_tag is found. Notify the user of the tag gap.
-          std::cerr << "tG" << std::flush;
-          //increment the timespec by the number of samples dropped
-          _metadata.time_spec += ::uhd::time_spec_t(0, ninput_items, _sample_rate);
-          return ninput_items;
-        }
-      }
+		int ninput_items=d_remaining;
 
 #ifdef GR_UHD_USE_STREAM_API
-      //send all ninput_items with metadata
-      const size_t num_sent = _tx_stream->send
-        (input_items, ninput_items, _metadata, 1.0);
+		//send all ninput_items with metadata
+		const size_t num_sent = _tx_stream->send(input_items,
+		                                         ninput_items,
+		                                         _metadata, 1.0);
+
 #else
-      const size_t num_sent = _dev->get_device()->send
-        (input_items, ninput_items, _metadata,
-         *_type, ::uhd::device::SEND_MODE_FULL_BUFF, 1.0);
+		const size_t num_sent = _dev->get_device()->send
+		(input_items, ninput_items, _metadata,
+			*_type, ::uhd::device::SEND_MODE_FULL_BUFF, 1.0);
 #endif
 
-      //if using length_tags, decrement items left to send by the number of samples sent
-      if(not pmt::is_null(_length_tag_key) && _nitems_to_send > 0) {
-        _nitems_to_send -= long(num_sent);
-      }
 
-      //increment the timespec by the number of samples sent
-      _metadata.time_spec += ::uhd::time_spec_t(0, num_sent, _sample_rate);
+	}
+}
 
-      // Some post-processing tasks if we actually transmitted the entire burst
-      if (not _pending_cmds.empty() && num_sent == size_t(ninput_items)) {
-        GR_LOG_DEBUG(d_debug_logger, boost::format("Executing %d pending commands.") % _pending_cmds.size());
-        BOOST_FOREACH(const pmt::pmt_t &cmd_pmt, _pending_cmds) {
-          msg_handler_command(cmd_pmt);
-        }
-        _pending_cmds.clear();
-      }
+int
+usrp_msg_sink_impl::
+work(int noutput_items, gr_vector_const_void_star &input_items,
+     gr_vector_void_star &output_items)
+{
+	return 0;
+}
 
-      return num_sent;
-    }
 
-    /***********************************************************************
-     * Tag Work
-     **********************************************************************/
-    void
-    usrp_msg_sink_impl::tag_work(int &ninput_items)
-    {
-      //the for loop below assumes tags sorted by count low -> high
-      std::sort(_tags.begin(), _tags.end(), tag_t::offset_compare);
-
-      //extract absolute sample counts
-      const uint64_t samp0_count = this->nitems_read(0);
-      uint64_t max_count = samp0_count + ninput_items;
-
-      // Go through tag list until something indicates the end of a burst.
-      bool found_time_tag = false;
-      bool found_eob = false;
-      // For commands that are in the middle of the burst:
-      std::vector<pmt::pmt_t> commands_in_burst; // Store the command
-      uint64_t in_burst_cmd_offset = 0; // Store its position
-      BOOST_FOREACH(const tag_t &my_tag, _tags) {
-        const uint64_t my_tag_count = my_tag.offset;
-        const pmt::pmt_t &key = my_tag.key;
-        const pmt::pmt_t &value = my_tag.value;
-
-        if (my_tag_count >= max_count) {
-          break;
-        }
-
-        /* I. Tags that can only be on the first sample of a burst
-         *
-         * This includes:
-         * - tx_time
-         * - tx_command TODO should also work end-of-burst
-         * - tx_sob
-         * - length tags
-         *
-         * With these tags, we check if they're on the first item, otherwise,
-         * we stop before that tag so they are on the first item the next time round.
-         */
-        else if (pmt::equal(key, COMMAND_KEY)) {
-          if (my_tag_count != samp0_count) {
-            max_count = my_tag_count;
-            break;
-          }
-          // TODO set the command time from the sample time
-          msg_handler_command(value);
-        }
-
-        //set the time specification in the metadata
-        else if(pmt::equal(key, TIME_KEY)) {
-          if (my_tag_count != samp0_count) {
-            max_count = my_tag_count;
-            break;
-          }
-          found_time_tag = true;
-          _metadata.has_time_spec = true;
-          _metadata.time_spec = ::uhd::time_spec_t
-            (pmt::to_uint64(pmt::tuple_ref(value, 0)),
-             pmt::to_double(pmt::tuple_ref(value, 1)));
-        }
-
-        //set the start of burst flag in the metadata; ignore if length_tag_key is not null
-        else if(pmt::is_null(_length_tag_key) && pmt::equal(key, SOB_KEY)) {
-          if (my_tag.offset != samp0_count) {
-            max_count = my_tag_count;
-            break;
-          }
-          // Bursty tx will not use time specs, unless a tx_time tag is also given.
-          _metadata.has_time_spec = false;
-          _metadata.start_of_burst = pmt::to_bool(value);
-        }
-
-        //length_tag found; set the start of burst flag in the metadata
-        else if(not pmt::is_null(_length_tag_key) && pmt::equal(key, _length_tag_key)) {
-          if (my_tag_count != samp0_count) {
-            max_count = my_tag_count;
-            break;
-          }
-          //If there are still items left to send, the current burst has been preempted.
-          //Set the items remaining counter to the new burst length. Notify the user of
-          //the tag preemption.
-          else if(_nitems_to_send > 0) {
-              std::cerr << "tP" << std::flush;
-          }
-          _nitems_to_send = pmt::to_long(value);
-          _metadata.start_of_burst = true;
-        }
-
-        /* II. Tags that can be on the first OR last sample of a burst
-         *
-         * This includes:
-         * - tx_freq
-         *
-         * With these tags, we check if they're at the start of a burst, and do
-         * the appropriate action. Otherwise, make sure the corresponding sample
-         * is the last one.
-         */
-        else if (pmt::equal(key, FREQ_KEY) && my_tag_count == samp0_count) {
-          // If it's on the first sample, immediately do the tune:
-          GR_LOG_DEBUG(d_debug_logger, boost::format("Received tx_freq on start of burst."));
-          pmt::pmt_t freq_cmd = pmt::make_dict();
-          freq_cmd = pmt::dict_add(freq_cmd, pmt::mp("freq"), value);
-          msg_handler_command(freq_cmd);
-        }
-        else if(pmt::equal(key, FREQ_KEY)) {
-          // If it's not on the first sample, queue this command and only tx until here:
-          GR_LOG_DEBUG(d_debug_logger, boost::format("Received tx_freq mid-burst."));
-          pmt::pmt_t freq_cmd = pmt::make_dict();
-          freq_cmd = pmt::dict_add(freq_cmd, pmt::mp("freq"), value);
-          commands_in_burst.push_back(freq_cmd);
-          max_count = my_tag_count + 1;
-          in_burst_cmd_offset = my_tag_count;
-        }
-
-        /* III. Tags that can only be on the last sample of a burst
-         *
-         * This includes:
-         * - tx_eob
-         *
-         * Make sure that no more samples are allowed through.
-         */
-        else if(pmt::is_null(_length_tag_key) && pmt::equal(key, EOB_KEY)) {
-          found_eob = true;
-          max_count = my_tag_count + 1;
-          _metadata.end_of_burst = pmt::to_bool(value);
-        }
-      } // end foreach
-
-      if(not pmt::is_null(_length_tag_key) && long(max_count - samp0_count) == _nitems_to_send) {
-        found_eob = true;
-      }
-
-      // If a command was found in-burst that may appear at the end of burst,
-      // there's two options:
-      // 1) The command was actually on the last sample (eob). Then, stash the
-      //    commands for running after work().
-      // 2) The command was not on the last sample. In this case, only send()
-      //    until before the tag, so it will be on the first sample of the next run.
-      if (not commands_in_burst.empty()) {
-        if (not found_eob) {
-          // ...then it's in the middle of a burst, only send() until before the tag
-          max_count = in_burst_cmd_offset;
-        } else if (in_burst_cmd_offset < max_count) {
-          BOOST_FOREACH(const pmt::pmt_t &cmd_pmt, commands_in_burst) {
-            _pending_cmds.push_back(cmd_pmt);
-          }
-        }
-      }
-
-      if (found_time_tag) {
-        _metadata.has_time_spec = true;
-      }
-
-      // Only transmit up to and including end of burst,
-      // or everything if no burst boundaries are found.
-      ninput_items = int(max_count - samp0_count);
-
-    } // end tag_work()
 
     void
     usrp_msg_sink_impl::set_start_time(const ::uhd::time_spec_t &time)

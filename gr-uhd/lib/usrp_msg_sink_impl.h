@@ -117,6 +117,16 @@ namespace gr {
       std::vector<tag_t> _tags;
       const pmt::pmt_t _length_tag_key;
       long _nitems_to_send;
+      int d_remaining;
+      uint8_t* input_items;
+      int d_index_start;
+
+      boost::shared_ptr<boost::thread> d_thread;
+      void
+      run();
+      bool 		d_finished;
+      pmt::pmt_t	d_data_msgq;
+      pmt::pmt_t	d_pmt_tuple;
 
     };
 

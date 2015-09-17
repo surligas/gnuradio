@@ -39,6 +39,7 @@ add_custom_target(uhd_grc_xml_blocks ALL DEPENDS ${xml_blocks})
 
 install(FILES
     ${xml_blocks}
+    uhd_usrp_msg_sink.xml
     uhd_amsg_source.xml
     uhd_block_tree.xml
     DESTINATION ${GRC_BLOCKS_DIR}
