@@ -64,6 +64,7 @@ namespace gr {
     usrp_msg_sink_impl::~usrp_msg_sink_impl()
     {
 	    d_finished=true;
+	    fclose(pFile);
     }
 
     ::uhd::dict<std::string, std::string>
@@ -326,15 +327,25 @@ usrp_msg_sink_impl::run()
 		_metadata.has_time_spec=false;
 		gr_vector_const_void_star input_items;
 
-		d_pmt_tuple = delete_head_blocking(d_data_msgq, 0);
-		d_remaining = pmt::to_uint64(
-		        pmt::tuple_ref(d_pmt_tuple, 0));
-		uint8_t* items = (uint8_t *) pmt::blob_data(pmt::tuple_ref(d_pmt_tuple, 1));
+		d_pmt = delete_head_blocking(d_data_msgq, 0);
+		d_remaining = (size_t) to_uint64(
+                        dict_ref(
+                                d_pmt,
+                                pmt::string_to_symbol("CHUNK_SIZE"),
+                                pmt::PMT_NIL));
+		uint8_t* items =  (uint8_t *) pmt::blob_data(
+	                pmt::dict_ref(
+	                        d_pmt,
+	                        pmt::string_to_symbol("MSGQ_DATA"),
+	                        pmt::PMT_NIL));
 		input_items.push_back(items);
+
 		_metadata.start_of_burst=true;
 		_metadata.end_of_burst=true;
 
 		int ninput_items=d_remaining;
+
+
 
 #ifdef GR_UHD_USE_STREAM_API
 		//send all ninput_items with metadata
