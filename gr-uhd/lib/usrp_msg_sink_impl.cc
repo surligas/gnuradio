@@ -58,6 +58,7 @@ namespace gr {
       _sample_rate = get_samp_rate();
 	d_thread = boost::shared_ptr<boost::thread>(
 	        new boost::thread(boost::bind(&usrp_msg_sink_impl::run, this)));
+
 	message_port_register_in(d_data_msgq);
     }
 
@@ -322,43 +323,30 @@ namespace gr {
 void
 usrp_msg_sink_impl::run()
 {
+	sleep(3);
 
 	while (!d_finished) {
-		_metadata.has_time_spec=false;
+		_metadata.has_time_spec = false;
 		gr_vector_const_void_star input_items;
 
 		d_pmt = delete_head_blocking(d_data_msgq, 0);
 		d_remaining = (size_t) to_uint64(
-                        dict_ref(
-                                d_pmt,
-                                pmt::string_to_symbol("CHUNK_SIZE"),
-                                pmt::PMT_NIL));
-		uint8_t* items =  (uint8_t *) pmt::blob_data(
-	                pmt::dict_ref(
-	                        d_pmt,
-	                        pmt::string_to_symbol("MSGQ_DATA"),
-	                        pmt::PMT_NIL));
+		        dict_ref(d_pmt, pmt::string_to_symbol("CHUNK_SIZE"),
+		                 pmt::PMT_NIL));
+		uint8_t* items = (uint8_t *) pmt::blob_data(
+		        pmt::dict_ref(d_pmt, pmt::string_to_symbol("MSGQ_DATA"),
+		                      pmt::PMT_NIL));
 		input_items.push_back(items);
 
-		_metadata.start_of_burst=true;
-		_metadata.end_of_burst=true;
+		_metadata.start_of_burst = true;
+		_metadata.end_of_burst = true;
 
-		int ninput_items=d_remaining;
+		int ninput_items = d_remaining;
 
-
-
-#ifdef GR_UHD_USE_STREAM_API
 		//send all ninput_items with metadata
 		const size_t num_sent = _tx_stream->send(input_items,
 		                                         ninput_items,
 		                                         _metadata, 1.0);
-
-#else
-		const size_t num_sent = _dev->get_device()->send
-		(input_items, ninput_items, _metadata,
-			*_type, ::uhd::device::SEND_MODE_FULL_BUFF, 1.0);
-#endif
-
 
 	}
 }
