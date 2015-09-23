@@ -53,13 +53,15 @@ namespace gr {
         d_finished(false),
         d_index_start(0),
         d_remaining(0),
-        d_data_msgq(pmt::mp("message_in"))
+        d_data_msgq(pmt::mp("message_in")),
+        d_ack_msgq(pmt::mp("ack_out"))
     {
       _sample_rate = get_samp_rate();
 	d_thread = boost::shared_ptr<boost::thread>(
 	        new boost::thread(boost::bind(&usrp_msg_sink_impl::run, this)));
 
 	message_port_register_in(d_data_msgq);
+	message_port_register_out(d_ack_msgq);
     }
 
     usrp_msg_sink_impl::~usrp_msg_sink_impl()
@@ -323,8 +325,7 @@ namespace gr {
 void
 usrp_msg_sink_impl::run()
 {
-	sleep(3);
-
+	sleep(2);
 	while (!d_finished) {
 		_metadata.has_time_spec = false;
 		gr_vector_const_void_star input_items;
@@ -347,6 +348,12 @@ usrp_msg_sink_impl::run()
 		const size_t num_sent = _tx_stream->send(input_items,
 		                                         ninput_items,
 		                                         _metadata, 1.0);
+		/*
+		 * After the message has been sent report it to the sender.
+		 * With this method we avoid a queue full of items
+		 * that will be dequeued by this thread in arbitrary timimgs
+		 */
+		message_port_pub(d_ack_msgq, pmt::from_bool(true));
 
 	}
 }

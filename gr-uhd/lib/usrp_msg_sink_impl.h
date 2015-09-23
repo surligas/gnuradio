@@ -128,6 +128,7 @@ namespace gr {
       run();
       bool 		d_finished;
       pmt::pmt_t	d_data_msgq;
+      pmt::pmt_t	d_ack_msgq;
       pmt::pmt_t	d_pmt;
 
     };

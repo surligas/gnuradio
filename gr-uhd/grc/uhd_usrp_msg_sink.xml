@@ -4180,6 +4180,11 @@ self.$(id).set_gain($gain31, 31)
 		<name>message_in</name>
 		<type>message</type>
 	</sink>
+	
+	<source>
+		<name>ack_out</name>
+		<type>message</type>
+	</source>
 	<doc>
 The UHD USRP Sink Block:
 
